@@ -1,0 +1,58 @@
+name: Profile Rust with LD_PRELOAD
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  profile:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    env:
+      AP_DIST: async-profiler-4.6-55f7f0e-linux-x64
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Download async-profiler
+        run: |
+          curl --fail --location --retry 2 --silent --show-error \
+            "https://github.com/async-profiler/async-profiler/releases/download/nightly/$AP_DIST.tar.gz" -o ap.tar.gz
+          echo '1ee29644f7b16a2eabf00c448b12b3fdfefa7ae1c9f17876e6f4e84b69267f06  ap.tar.gz' | sha256sum --check
+          tar -xzf ap.tar.gz "$AP_DIST/lib/libasyncProfiler.so"
+      - name: Compile Rust workload
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustc +nightly --edition=2021 -C opt-level=2 -C debuginfo=2 \
+            -C force-unwind-tables=yes rust_preload_probe.rs
+      - name: Profile Rust workload
+        id: probe
+        run: |
+          mkdir -m 700 "$RUNNER_TEMP/probe-cores"
+          sudo sysctl -w "kernel.core_pattern=$RUNNER_TEMP/probe-cores/core.%p"
+          ulimit -c unlimited
+          # exec preserves this PID so the upload selects only the probe's dump.
+          echo "pid=$$" >> "$GITHUB_OUTPUT"
+          exec env -i PATH="$PATH" HOME="$HOME" \
+            LD_PRELOAD="$PWD/$AP_DIST/lib/libasyncProfiler.so" \
+            ASPROF_COMMAND='start,event=cpu,interval=10ms,wall=100ms,nativemem,cstack=dwarf,file=profiler.jfr' \
+            ./rust_preload_probe
+      - name: Upload probe core dump
+        if: failure() && steps.probe.outcome == 'failure' && steps.probe.outputs.pid != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rust-preload-probe-core
+          path: ${{ runner.temp }}/probe-cores/core.${{ steps.probe.outputs.pid }}
+          if-no-files-found: warn
+          retention-days: 3
+      - name: Verify recorded CPU, wall and native allocation samples
+        shell: bash
+        run: |
+          jfr summary profiler.jfr | awk '
+            $1 == "jdk.ExecutionSample"       { cpu += $2 }
+            $1 == "profiler.WallClockSample"  { wall += $2 }
+            $1 == "profiler.Malloc"           { allocs += $2 }
+            END {
+              printf "CPU samples: %d, wall samples: %d, native allocations: %d\n", cpu, wall, allocs
+              exit !(cpu > 0 && wall > 0 && allocs > 0)
+            }'
