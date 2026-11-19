@@ -22,8 +22,8 @@ jobs:
           tar -xzf ap.tar.gz "$AP_DIST/lib/libasyncProfiler.so"
       - name: Compile Rust workload
         run: |
-          rustup toolchain install nightly --profile minimal
-          rustc +nightly --edition=2021 -C opt-level=2 -C debuginfo=2 \
+          rustup toolchain install nightly-2025-06-01 --profile minimal
+          rustc +nightly-2025-06-01 --edition=2021 -C opt-level=2 -C debuginfo=2 \
             -C force-unwind-tables=yes rust_preload_probe.rs
       - name: Profile Rust workload
         id: probe
