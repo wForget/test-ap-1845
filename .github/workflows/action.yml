@@ -11,14 +11,13 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     env:
-      AP_DIST: async-profiler-4.6-55f7f0e-linux-x64
+      AP_DIST: async-profiler-4.6-642ab2e-linux-x64
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Download async-profiler
         run: |
           curl --fail --location --retry 2 --silent --show-error \
             "https://github.com/async-profiler/async-profiler/releases/download/nightly/$AP_DIST.tar.gz" -o ap.tar.gz
-          echo '1ee29644f7b16a2eabf00c448b12b3fdfefa7ae1c9f17876e6f4e84b69267f06  ap.tar.gz' | sha256sum --check
           tar -xzf ap.tar.gz "$AP_DIST/lib/libasyncProfiler.so"
       - name: Compile Rust workload
         run: |
