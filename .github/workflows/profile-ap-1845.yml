@@ -1,0 +1,66 @@
+name: Profile Rust with LD_PRELOAD (AP-1845)
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 * * * *'
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  profile:
+    strategy:
+      fail-fast: false
+      matrix:
+        trial: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    env:
+      AP_DIST: async-profiler-4.6-636798c-linux-x64
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Download async-profiler from AP-1845 run 45178317267
+        env:
+          GH_TOKEN: ${{ secrets.ASYNC_PROFILER_READ_TOKEN || github.token }}
+        shell: bash
+        run: |
+          gh api repos/wForget/async-profiler/actions/artifacts/14820353356/zip > ap.zip
+          echo '6d61be8431e6818d85b665d4ed2e42c51542f59f09b118abcf13eae0eb21a5fc  ap.zip' | sha256sum --check -
+          unzip -p ap.zip "$AP_DIST.tar.gz" | tar -xzf - "$AP_DIST/lib/libasyncProfiler.so"
+      - name: Compile Rust workload
+        run: |
+          rustup toolchain install nightly-2025-06-01 --profile minimal
+          rustc +nightly-2025-06-01 --edition=2021 -C opt-level=2 -C debuginfo=2 \
+            -C force-unwind-tables=yes rust_preload_probe.rs
+      - name: Profile Rust workload
+        id: probe
+        run: |
+          mkdir -m 700 "$RUNNER_TEMP/probe-cores"
+          sudo sysctl -w "kernel.core_pattern=$RUNNER_TEMP/probe-cores/core.%p"
+          ulimit -c unlimited
+          # exec preserves this PID so the upload selects only the probe's dump.
+          echo "pid=$$" >> "$GITHUB_OUTPUT"
+          exec env -i PATH="$PATH" HOME="$HOME" \
+            LD_PRELOAD="$PWD/$AP_DIST/lib/libasyncProfiler.so" \
+            ASPROF_COMMAND='start,event=cpu,interval=10ms,wall=100ms,nativemem,cstack=dwarf,file=profiler.jfr' \
+            ./rust_preload_probe 300
+      - name: Upload probe core dump
+        if: failure() && steps.probe.outcome == 'failure' && steps.probe.outputs.pid != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rust-preload-probe-core-${{ matrix.trial }}
+          path: ${{ runner.temp }}/probe-cores/core.${{ steps.probe.outputs.pid }}
+          if-no-files-found: warn
+          retention-days: 3
+      - name: Verify recorded CPU, wall and native allocation samples
+        shell: bash
+        run: |
+          jfr summary profiler.jfr | awk '
+            $1 == "jdk.ExecutionSample"       { cpu += $2 }
+            $1 == "profiler.WallClockSample"  { wall += $2 }
+            $1 == "profiler.Malloc"           { allocs += $2 }
+            END {
+              printf "CPU samples: %d, wall samples: %d, native allocations: %d\n", cpu, wall, allocs
+              exit !(cpu > 0 && wall > 0 && allocs > 0)
+            }'
