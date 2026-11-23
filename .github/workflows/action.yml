@@ -7,6 +7,10 @@ permissions:
 
 jobs:
   profile:
+    strategy:
+      fail-fast: false
+      matrix:
+        trial: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     env:
@@ -34,12 +38,12 @@ jobs:
           exec env -i PATH="$PATH" HOME="$HOME" \
             LD_PRELOAD="$PWD/$AP_DIST/lib/libasyncProfiler.so" \
             ASPROF_COMMAND='start,event=cpu,interval=10ms,wall=100ms,nativemem,cstack=dwarf,file=profiler.jfr' \
-            ./rust_preload_probe
+            ./rust_preload_probe 300
       - name: Upload probe core dump
         if: failure() && steps.probe.outcome == 'failure' && steps.probe.outputs.pid != ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: rust-preload-probe-core
+          name: rust-preload-probe-core-${{ matrix.trial }}
           path: ${{ runner.temp }}/probe-cores/core.${{ steps.probe.outputs.pid }}
           if-no-files-found: warn
           retention-days: 3
