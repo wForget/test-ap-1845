@@ -1,0 +1,84 @@
+name: Profile Riffle shuffle server
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  profile:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    env:
+      AP_DIST: async-profiler-4.6-642ab2e-linux-x64
+    steps:
+      - name: Check out Riffle master
+        run: |
+          git clone --depth 1 --branch master https://github.com/zuston/riffle.git riffle
+          git -C riffle rev-parse HEAD
+
+      - name: Build riffle-server with the profiling profile
+        working-directory: riffle
+        run: |
+          curl -fsSL --retry 2 \
+            https://github.com/protocolbuffers/protobuf/releases/download/v23.2/protoc-23.2-linux-x86_64.zip -o "$RUNNER_TEMP/protoc.zip"
+          echo "179a759581bf4b32cc5edae4ffce6b8ee16ba4f4ab99ad3a309c31113f98d472  $RUNNER_TEMP/protoc.zip" | sha256sum --check
+          unzip -q "$RUNNER_TEMP/protoc.zip" -d "$RUNNER_TEMP/protoc"
+          export PATH="$RUNNER_TEMP/protoc/bin:$PATH"
+          cargo build --locked --profile profiling -p riffle-server --bin riffle-server
+
+      - name: Prepare async-profiler and standalone Riffle config
+        run: |
+          curl -fsSL --retry 2 "https://github.com/async-profiler/async-profiler/releases/download/nightly/$AP_DIST.tar.gz" -o ap.tar.gz
+          echo 'a74ea8d8be789bf5f26bb7fb595ac3e9c0122e31318c3fa4b6794837aa837b45  ap.tar.gz' | sha256sum --check
+          tar -xzf ap.tar.gz "$AP_DIST/lib/libasyncProfiler.so"
+
+          cat > riffle.toml <<'TOML'
+          store_type = "MEMORY"
+          coordinator_quorum = []
+          grpc_port = 19999
+          fallback_random_ports_enable = false
+
+          [memory_store]
+          capacity = "128M"
+          TOML
+
+      - name: Profile the shuffle server for three minutes
+        # Keep the server's listeners local to this step.
+        shell: unshare --user --map-root-user --net bash --noprofile --norc -eu -o pipefail {0}
+        run: |
+          ip link set lo up
+          WORKER_IP=127.0.0.1 \
+            LD_PRELOAD="$PWD/$AP_DIST/lib/libasyncProfiler.so" \
+            ASPROF_COMMAND='start,event=cpu,interval=10ms,wall=100ms,nativemem,cstack=dwarf,file=riffle.jfr' \
+            ./riffle/target/profiling/riffle-server --config riffle.toml &
+          pid=$!
+          trap 'kill -KILL "$pid" 2>/dev/null || true' EXIT
+
+          deadline=$((SECONDS + 30))
+          until (: >/dev/tcp/127.0.0.1/19999) 2>/dev/null; do
+            if ! kill -0 "$pid" 2>/dev/null || (( SECONDS >= deadline )); then
+              echo 'Riffle failed to open its gRPC port' >&2
+              exit 1
+            fi
+            sleep 1
+          done
+
+          status=0
+          timeout 180s tail --pid="$pid" -f /dev/null || status=$?
+          if [[ $status != 124 ]]; then
+            echo 'Riffle did not stay up for three minutes' >&2
+            exit 1
+          fi
+          kill -TERM "$pid"
+          timeout 30s tail --pid="$pid" -f /dev/null
+          wait "$pid"
+          trap - EXIT
+          jfr summary riffle.jfr | awk '$1 == "profiler.WallClockSample" { samples += $2 } END { exit !(samples > 0) }'
+
+      - name: Upload Riffle recording
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: riffle-profile
+          path: riffle.jfr
+          if-no-files-found: error

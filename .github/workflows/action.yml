@@ -1,6 +1,5 @@
 name: Profile Rust with LD_PRELOAD
 on:
-  push:
   workflow_dispatch:
 
 permissions:
